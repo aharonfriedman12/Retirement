@@ -16,6 +16,7 @@ const COLS = ["id","title","cat","status","prio","due","reminderDays","who","pho
 let tokenClient = null;
 let accessToken = null;
 let tokenExpiry = 0;
+let tasksSheetId = null; // מזהה פנימי (מספרי) של לשונית Tasks — נדרש למחיקת שורה
 
 /* ---------- טעינת ספריית גוגל והכנת לקוח הטוקן ---------- */
 export function initGoogle() {
@@ -117,6 +118,32 @@ export async function addTask(t) {
   });
 }
 
+/* ---------- מחיקת משימה (מסירה את השורה מהגיליון + תזכורת מהיומן) ---------- */
+async function getTasksSheetId() {
+  if (tasksSheetId !== null) return tasksSheetId;
+  const data = await api(`${SHEETS}/${SHEET_ID}?fields=sheets.properties`);
+  const sheet = (data.sheets || []).find((s) => s.properties?.title === "Tasks");
+  if (!sheet) throw new Error('לא נמצאה לשונית בשם "Tasks"');
+  tasksSheetId = sheet.properties.sheetId;
+  return tasksSheetId;
+}
+
+export async function deleteTask(t) {
+  // קודם מוחקים את התזכורת מהיומן (אם קיימת), כדי לא להשאיר אירוע יתום
+  if (t.eventId) await deleteCalendarEvent(t.eventId);
+  const sheetId = await getTasksSheetId();
+  await api(`${SHEETS}/${SHEET_ID}:batchUpdate`, {
+    method: "POST",
+    body: JSON.stringify({
+      requests: [{
+        deleteDimension: {
+          range: { sheetId, dimension: "ROWS", startIndex: t._row - 1, endIndex: t._row },
+        },
+      }],
+    }),
+  });
+}
+
 /* ---------- הגדרות (תאריך פרישה וכו') מלשונית Config ---------- */
 export async function readConfig() {
   const data = await api(`${SHEETS}/${SHEET_ID}/values/Config!A2:B50`);
@@ -144,4 +171,17 @@ export async function upsertReminder(t) {
   }
   const ev = await api(CAL, { method: "POST", body: JSON.stringify(body) });
   return ev.id;
+}
+
+/* ---------- יומן: מחיקת אירוע (מתעלם בעדינות אם כבר נמחק) ---------- */
+export async function deleteCalendarEvent(eventId) {
+  const t = await getToken();
+  const res = await fetch(`${CAL}/${eventId}`, {
+    method: "DELETE",
+    headers: { Authorization: `Bearer ${t}` },
+  });
+  // 204 = נמחק, 404/410 = כבר לא קיים — שני המקרים תקינים
+  if (!res.ok && res.status !== 404 && res.status !== 410) {
+    throw new Error(`מחיקת אירוע מהיומן נכשלה (${res.status})`);
+  }
 }
