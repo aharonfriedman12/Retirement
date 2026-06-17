@@ -2,6 +2,7 @@ import { useState, useEffect, useMemo } from "react";
 import {
   CheckCircle2, Circle, CircleDashed, Hourglass, Phone, FileText, CalendarPlus,
   AlertTriangle, LayoutGrid, ListTodo, Paperclip, Users, ChevronLeft, Bell, Plus, ShieldCheck, X,
+  Pencil, Trash2,
 } from "lucide-react";
 import { CATEGORIES, STATUSES, PRIORITIES } from "./config";
 import * as G from "./google";
@@ -22,6 +23,9 @@ export default function App() {
   const [filter, setFilter] = useState("הכל");
   const [open, setOpen] = useState(null);
   const [adding, setAdding] = useState(false);
+  const [editing, setEditing] = useState(null);   // המשימה שנמצאת בעריכה
+  const [deleting, setDeleting] = useState(null);  // המשימה שממתינה לאישור מחיקה
+  const [busy, setBusy] = useState(false);
   const [toast, setToast] = useState("");
 
   useEffect(() => {
@@ -83,6 +87,40 @@ export default function App() {
       flash("המשימה נוספה ✓");
     } catch (e) {
       flash("ההוספה נכשלה — " + e.message);
+    }
+  }
+
+  async function saveEdit(form) {
+    // משמרים את השדות הנסתרים מהמשימה המקורית (_row, id, eventId)
+    const orig = editing;
+    const merged = { ...orig, ...form };
+    // התאמת תאריך ההשלמה לסטטוס
+    if (merged.status === "הושלם" && !merged.doneDate) merged.doneDate = new Date().toISOString().slice(0, 10);
+    if (merged.status !== "הושלם") merged.doneDate = "";
+    setEditing(null);
+    setOpen(null);
+    try {
+      await G.updateTask(merged);
+      await load();
+      flash("השינויים נשמרו ✓");
+    } catch (e) {
+      flash("השמירה נכשלה — " + e.message);
+    }
+  }
+
+  async function confirmDelete() {
+    const t = deleting;
+    setBusy(true);
+    try {
+      await G.deleteTask(t);
+      setDeleting(null);
+      setOpen(null);
+      await load();
+      flash("המשימה נמחקה");
+    } catch (e) {
+      flash("המחיקה נכשלה — " + e.message);
+    } finally {
+      setBusy(false);
     }
   }
 
@@ -244,8 +282,11 @@ export default function App() {
         <Tab id="contacts" cur={tab} set={setTab} icon={<Users size={21} />} label="קשר" />
       </nav>
 
-      {open && <Detail t={open} onClose={() => setOpen(null)} onStatus={cycleStatus} onReminder={addReminder} />}
-      {adding && <AddTask onClose={() => setAdding(false)} onSave={saveNew} />}
+      {open && <Detail t={open} onClose={() => setOpen(null)} onStatus={cycleStatus} onReminder={addReminder}
+        onEdit={() => setEditing(open)} onDelete={() => setDeleting(open)} />}
+      {adding && <TaskForm title="משימה חדשה" submitLabel="שמירת המשימה" onClose={() => setAdding(false)} onSave={saveNew} />}
+      {editing && <TaskForm title="עריכת משימה" submitLabel="שמירת שינויים" initial={editing} onClose={() => setEditing(null)} onSave={saveEdit} />}
+      {deleting && <ConfirmDelete t={deleting} busy={busy} onCancel={() => setDeleting(null)} onConfirm={confirmDelete} />}
       {toast && <div className="toast">{toast}</div>}
     </div>
   );
@@ -324,14 +365,20 @@ function Row({ t, onStatus, onOpen }) {
   );
 }
 
-function Detail({ t, onClose, onStatus, onReminder }) {
+function Detail({ t, onClose, onStatus, onReminder, onEdit, onDelete }) {
   const [saving, setSaving] = useState(false);
   const has = !!t.eventId;
   return (
     <div className="sheet-bg" onClick={onClose}>
       <div className="sheet" onClick={(e) => e.stopPropagation()}>
         <div className="sheet-grab" />
-        <span className="tag" style={{ background: catColor(t.cat) + "1A", color: catColor(t.cat) }}>{t.cat}</span>
+        <div className="detail-top">
+          <span className="tag" style={{ background: catColor(t.cat) + "1A", color: catColor(t.cat) }}>{t.cat}</span>
+          <div className="detail-actions">
+            <button className="icon-btn" onClick={onEdit} aria-label="עריכה"><Pencil size={17} /></button>
+            <button className="icon-btn danger" onClick={onDelete} aria-label="מחיקה"><Trash2 size={17} /></button>
+          </div>
+        </div>
         <h3>{t.title}</h3>
         <button className="status-pill" onClick={() => onStatus(t)}>
           <StatusIcon status={t.status} size={16} /> {t.status} · להחלפה
@@ -356,8 +403,10 @@ function Detail({ t, onClose, onStatus, onReminder }) {
   );
 }
 
-function AddTask({ onClose, onSave }) {
-  const [f, setF] = useState({ title: "", cat: Object.keys(CATEGORIES)[0], status: STATUSES[0], prio: "בינונית", due: "", reminderDays: "3", who: "", phone: "", docs: "", note: "" });
+function TaskForm({ title, submitLabel, initial, onClose, onSave }) {
+  const blank = { title: "", cat: Object.keys(CATEGORIES)[0], status: STATUSES[0], prio: "בינונית", due: "", reminderDays: "3", who: "", phone: "", docs: "", link: "", note: "" };
+  // בעריכה: ממלאים מראש מהמשימה הקיימת; שדות ריקים נשארים ריקים וניתנים למילוי
+  const [f, setF] = useState(initial ? { ...blank, ...pick(initial) } : blank);
   const set = (k, v) => setF((s) => ({ ...s, [k]: v }));
   const valid = f.title.trim().length > 0;
   return (
@@ -365,26 +414,53 @@ function AddTask({ onClose, onSave }) {
       <div className="sheet" onClick={(e) => e.stopPropagation()}>
         <div className="sheet-grab" />
         <h3 style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-          משימה חדשה <button className="bell" onClick={onClose} style={{ width: 34, height: 34 }}><X size={18} /></button>
+          {title} <button className="bell" onClick={onClose} style={{ width: 34, height: 34 }}><X size={18} /></button>
         </h3>
         <div className="field"><label>שם המשימה</label><input value={f.title} onChange={(e) => set("title", e.target.value)} placeholder="למשל: הגשת טופס 161" /></div>
         <div className="two">
           <div className="field"><label>קטגוריה</label>
             <select value={f.cat} onChange={(e) => set("cat", e.target.value)}>{Object.keys(CATEGORIES).map((c) => <option key={c}>{c}</option>)}</select></div>
-          <div className="field"><label>עדיפות</label>
-            <select value={f.prio} onChange={(e) => set("prio", e.target.value)}>{PRIORITIES.map((p) => <option key={p}>{p}</option>)}</select></div>
+          <div className="field"><label>סטטוס</label>
+            <select value={f.status} onChange={(e) => set("status", e.target.value)}>{STATUSES.map((s) => <option key={s}>{s}</option>)}</select></div>
         </div>
         <div className="two">
-          <div className="field"><label>תאריך יעד</label><input type="date" value={f.due} onChange={(e) => set("due", e.target.value)} /></div>
+          <div className="field"><label>עדיפות</label>
+            <select value={f.prio} onChange={(e) => set("prio", e.target.value)}>{PRIORITIES.map((p) => <option key={p}>{p}</option>)}</select></div>
           <div className="field"><label>תזכורת (ימים לפני)</label><input type="number" value={f.reminderDays} onChange={(e) => set("reminderDays", e.target.value)} /></div>
         </div>
+        <div className="field"><label>תאריך יעד</label><input type="date" value={f.due} onChange={(e) => set("due", e.target.value)} /></div>
         <div className="two">
           <div className="field"><label>גורם מטפל</label><input value={f.who} onChange={(e) => set("who", e.target.value)} /></div>
           <div className="field"><label>טלפון</label><input value={f.phone} onChange={(e) => set("phone", e.target.value)} /></div>
         </div>
         <div className="field"><label>מסמכים נדרשים</label><input value={f.docs} onChange={(e) => set("docs", e.target.value)} /></div>
+        <div className="field"><label>קישור</label><input value={f.link} onChange={(e) => set("link", e.target.value)} placeholder="https://" /></div>
         <div className="field"><label>הערות</label><textarea value={f.note} onChange={(e) => set("note", e.target.value)} /></div>
-        <button className="cal-btn" disabled={!valid} onClick={() => onSave(f)}>שמירת המשימה</button>
+        <button className="cal-btn" disabled={!valid} onClick={() => onSave(f)}>{submitLabel}</button>
+      </div>
+    </div>
+  );
+}
+
+// שולף רק את השדות שהטופס מנהל (לא _row/id/eventId/doneDate — אלה נשמרים בנפרד)
+function pick(t) {
+  const keys = ["title", "cat", "status", "prio", "due", "reminderDays", "who", "phone", "docs", "link", "note"];
+  const o = {};
+  keys.forEach((k) => { if (t[k] !== undefined && t[k] !== "") o[k] = t[k]; });
+  return o;
+}
+
+function ConfirmDelete({ t, busy, onCancel, onConfirm }) {
+  return (
+    <div className="sheet-bg" onClick={onCancel} style={{ alignItems: "center" }}>
+      <div className="confirm" onClick={(e) => e.stopPropagation()}>
+        <div className="confirm-icon"><Trash2 size={24} /></div>
+        <h3>למחוק את המשימה?</h3>
+        <p>"{t.title}" תימחק מהגיליון{t.eventId ? ", והתזכורת תוסר מהיומן" : ""}. פעולה זו בלתי הפיכה.</p>
+        <div className="confirm-btns">
+          <button className="btn-ghost" onClick={onCancel} disabled={busy}>ביטול</button>
+          <button className="btn-danger" onClick={onConfirm} disabled={busy}>{busy ? "מוחק…" : "מחיקה"}</button>
+        </div>
       </div>
     </div>
   );
