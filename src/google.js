@@ -11,7 +11,15 @@ const CAL = "https://www.googleapis.com/calendar/v3/calendars/primary/events";
 // סדר העמודות בלשונית Tasks (חייב להתאים לכותרות בגיליון)
 // A id | B title | C cat | D status | E prio | F due | G reminderDays
 // H who | I phone | J docs | K link | L note | M doneDate | N eventId
-const COLS = ["id","title","cat","status","prio","due","reminderDays","who","phone","docs","link","note","doneDate","eventId"];
+// O dependsOn | P waitingSince | Q recheckDate
+const COLS = [
+  "id","title","cat","status","prio","due","reminderDays",
+  "who","phone","docs","link","note","doneDate","eventId",
+  "dependsOn","waitingSince","recheckDate",
+];
+const RANGE = "Tasks!A2:Q2000";
+const ROW_RANGE = (row) => `Tasks!A${row}:Q${row}`;
+const APPEND_RANGE = "Tasks!A:Q:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS";
 
 let tokenClient = null;
 let accessToken = null;
@@ -99,12 +107,12 @@ function taskToRow(t) {
 
 /* ---------- משימות ---------- */
 export async function readTasks() {
-  const data = await api(`${SHEETS}/${SHEET_ID}/values/Tasks!A2:N2000`);
+  const data = await api(`${SHEETS}/${SHEET_ID}/values/${RANGE}`);
   return (data.values || []).map((r, i) => rowToTask(r, i + 2)).filter((t) => t.title);
 }
 
 export async function updateTask(t) {
-  await api(`${SHEETS}/${SHEET_ID}/values/Tasks!A${t._row}:N${t._row}?valueInputOption=USER_ENTERED`, {
+  await api(`${SHEETS}/${SHEET_ID}/values/${ROW_RANGE(t._row)}?valueInputOption=USER_ENTERED`, {
     method: "PUT",
     body: JSON.stringify({ values: [taskToRow(t)] }),
   });
@@ -112,7 +120,7 @@ export async function updateTask(t) {
 
 export async function addTask(t) {
   const row = taskToRow({ ...t, id: Date.now() });
-  await api(`${SHEETS}/${SHEET_ID}/values/Tasks!A:N:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`, {
+  await api(`${SHEETS}/${SHEET_ID}/values/${APPEND_RANGE}`, {
     method: "POST",
     body: JSON.stringify({ values: [row] }),
   });
