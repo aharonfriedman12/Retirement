@@ -2,7 +2,7 @@ import { useState, useEffect, useMemo } from "react";
 import {
   CheckCircle2, Circle, CircleDashed, Hourglass, Phone, FileText, CalendarPlus,
   AlertTriangle, LayoutGrid, ListTodo, Paperclip, Users, ChevronLeft, Bell, Plus, ShieldCheck, X,
-  Pencil, Trash2,
+  Pencil, Trash2, Link2, Search,
 } from "lucide-react";
 import { CATEGORIES, STATUSES, PRIORITIES } from "./config";
 import * as G from "./google";
@@ -21,6 +21,7 @@ export default function App() {
   const [config, setConfig] = useState({});
   const [tab, setTab] = useState("dash");
   const [filter, setFilter] = useState("הכל");
+  const [search, setSearch] = useState("");
   const [open, setOpen] = useState(null);
   const [adding, setAdding] = useState(false);
   const [editing, setEditing] = useState(null);   // המשימה שנמצאת בעריכה
@@ -60,7 +61,14 @@ export default function App() {
 
   async function cycleStatus(task) {
     const next = STATUSES[(STATUSES.indexOf(task.status) + 1) % STATUSES.length];
-    const updated = { ...task, status: next, doneDate: next === "הושלם" ? new Date().toISOString().slice(0, 10) : "" };
+    const today = new Date().toISOString().slice(0, 10);
+    const updated = {
+      ...task,
+      status: next,
+      doneDate: next === "הושלם" ? today : "",
+      // ממלא "ממתין מאז" אוטומטית בכניסה למצב הזה, ומנקה ביציאה ממנו
+      waitingSince: next === "ממתין לגורם חיצוני" ? (task.waitingSince || today) : "",
+    };
     setTasks((arr) => arr.map((t) => (t._row === task._row ? updated : t)));
     if (open && open._row === task._row) setOpen(updated);
     try { await G.updateTask(updated); } catch (e) { flash("שמירה נכשלה — " + e.message); }
@@ -94,9 +102,13 @@ export default function App() {
     // משמרים את השדות הנסתרים מהמשימה המקורית (_row, id, eventId)
     const orig = editing;
     const merged = { ...orig, ...form };
+    const today = new Date().toISOString().slice(0, 10);
     // התאמת תאריך ההשלמה לסטטוס
-    if (merged.status === "הושלם" && !merged.doneDate) merged.doneDate = new Date().toISOString().slice(0, 10);
+    if (merged.status === "הושלם" && !merged.doneDate) merged.doneDate = today;
     if (merged.status !== "הושלם") merged.doneDate = "";
+    // "ממתין מאז" מתמלא אוטומטית בכניסה למצב, ומתנקה ביציאה ממנו
+    if (merged.status === "ממתין לגורם חיצוני") merged.waitingSince = orig.waitingSince || today;
+    else merged.waitingSince = "";
     setEditing(null);
     setOpen(null);
     try {
@@ -125,11 +137,26 @@ export default function App() {
   }
 
   /* ---------- חישובים לדשבורד ---------- */
+  const byId = useMemo(() => {
+    const m = {};
+    tasks.forEach((t) => { if (t.id) m[t.id] = t; });
+    return m;
+  }, [tasks]);
+
+  const isBlocked = (t) => {
+    if (!t.dependsOn) return false;
+    const blocker = byId[t.dependsOn];
+    return !!blocker && blocker.status !== "הושלם";
+  };
+
   const active = tasks.filter((t) => t.status !== "הושלם");
-  const urgent = active.filter((t) => t.status !== "ממתין לגורם חיצוני" && daysUntil(t.due) >= 0 && daysUntil(t.due) <= 14).sort((a, b) => daysUntil(a.due) - daysUntil(b.due));
-  const overdue = active.filter((t) => t.due && daysUntil(t.due) < 0);
-  const waiting = active.filter((t) => t.status === "ממתין לגורם חיצוני");
+  const urgent = active.filter((t) => !isBlocked(t) && t.status !== "ממתין לגורם חיצוני" && daysUntil(t.due) >= 0 && daysUntil(t.due) <= 14).sort((a, b) => daysUntil(a.due) - daysUntil(b.due));
+  const overdue = active.filter((t) => !isBlocked(t) && t.due && daysUntil(t.due) < 0);
+  const waiting = active.filter((t) => t.status === "ממתין לגורם חיצוני")
+    .map((t) => ({ ...t, _waitDays: t.waitingSince ? daysUntil(t.waitingSince) * -1 : null }))
+    .sort((a, b) => (b._waitDays ?? 0) - (a._waitDays ?? 0));
   const doneCount = tasks.filter((t) => t.status === "הושלם").length;
+  const blockedCount = active.filter(isBlocked).length;
 
   const discharge = config.dischargeDate ? new Date(config.dischargeDate) : new Date(Date.now() + 120 * dayMs);
   const start = config.journeyStart ? new Date(config.journeyStart) : new Date(Date.now() - 90 * dayMs);
@@ -143,7 +170,12 @@ export default function App() {
       return { cat: c, done, total: all.length, pct: all.length ? done / all.length : 0 };
     }).filter((r) => r.total > 0), [tasks]);
 
-  const shown = filter === "הכל" ? tasks : tasks.filter((t) => t.cat === filter);
+  const bySearch = (t) => {
+    if (!search.trim()) return true;
+    const q = search.trim().toLowerCase();
+    return [t.title, t.who, t.note].some((f) => (f || "").toLowerCase().includes(q));
+  };
+  const shown = (filter === "הכל" ? tasks : tasks.filter((t) => t.cat === filter)).filter(bySearch);
   const contacts = tasks.filter((t) => t.who).reduce((acc, t) => {
     if (!acc.find((a) => a.who === t.who)) acc.push({ who: t.who, phone: t.phone, cat: t.cat });
     return acc;
@@ -193,6 +225,7 @@ export default function App() {
               <StatCard icon={<AlertTriangle size={18} />} label="דורש פעולה השבוע" value={urgent.length} tone="#C98A2B" />
               <StatCard icon={<AlertTriangle size={18} />} label="באיחור" value={overdue.length} tone="#C5523E" />
               <StatCard icon={<Hourglass size={18} />} label="ממתין לגורם חיצוני" value={waiting.length} tone="#7A5C7E" />
+              <StatCard icon={<Link2 size={18} />} label="חסום ע״י משימה אחרת" value={blockedCount} tone="#6E7873" />
               <StatCard icon={<CheckCircle2 size={18} />} label="הושלמו" value={doneCount} tone="#3F9D5A" />
             </section>
 
@@ -223,7 +256,7 @@ export default function App() {
             </Block>
 
             <Block title="ממתין לגורם חיצוני — למי לנדנד" tone="#7A5C7E">
-              {waiting.length ? waiting.map((t) => <Row key={t._row} t={t} onStatus={cycleStatus} onOpen={setOpen} />)
+              {waiting.length ? waiting.map((t) => <Row key={t._row} t={t} onStatus={cycleStatus} onOpen={setOpen} waitInfo />)
                 : <Empty>שום דבר לא תקוע אצל אחרים כרגע.</Empty>}
             </Block>
           </>
@@ -231,6 +264,11 @@ export default function App() {
 
         {!loading && tab === "tasks" && (
           <>
+            <div className="search-box">
+              <Search size={17} />
+              <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="חיפוש לפי שם, גורם מטפל או הערה…" />
+              {search && <button className="search-clear" onClick={() => setSearch("")}><X size={15} /></button>}
+            </div>
             <div className="chips">
               {["הכל", ...Object.keys(CATEGORIES)].map((c) => (
                 <button key={c} className={"chip" + (filter === c ? " chip-on" : "")}
@@ -239,8 +277,8 @@ export default function App() {
               ))}
             </div>
             <div className="list">
-              {shown.length ? shown.map((t) => <Row key={t._row} t={t} onStatus={cycleStatus} onOpen={setOpen} />)
-                : <Empty>אין משימות בקטגוריה הזו.</Empty>}
+              {shown.length ? shown.map((t) => <Row key={t._row} t={t} onStatus={cycleStatus} onOpen={setOpen} blocked={isBlocked(t)} />)
+                : <Empty>{search ? "אין תוצאות לחיפוש." : "אין משימות בקטגוריה הזו."}</Empty>}
             </div>
           </>
         )}
@@ -283,9 +321,9 @@ export default function App() {
       </nav>
 
       {open && <Detail t={open} onClose={() => setOpen(null)} onStatus={cycleStatus} onReminder={addReminder}
-        onEdit={() => setEditing(open)} onDelete={() => setDeleting(open)} />}
-      {adding && <TaskForm title="משימה חדשה" submitLabel="שמירת המשימה" onClose={() => setAdding(false)} onSave={saveNew} />}
-      {editing && <TaskForm title="עריכת משימה" submitLabel="שמירת שינויים" initial={editing} onClose={() => setEditing(null)} onSave={saveEdit} />}
+        onEdit={() => setEditing(open)} onDelete={() => setDeleting(open)} blocker={open.dependsOn ? byId[open.dependsOn] : null} />}
+      {adding && <TaskForm title="משימה חדשה" submitLabel="שמירת המשימה" tasks={tasks} onClose={() => setAdding(false)} onSave={saveNew} />}
+      {editing && <TaskForm title="עריכת משימה" submitLabel="שמירת שינויים" initial={editing} tasks={tasks} onClose={() => setEditing(null)} onSave={saveEdit} />}
       {deleting && <ConfirmDelete t={deleting} busy={busy} onCancel={() => setDeleting(null)} onConfirm={confirmDelete} />}
       {toast && <div className="toast">{toast}</div>}
     </div>
@@ -342,10 +380,13 @@ function Block({ title, tone, children }) {
 }
 function Empty({ children }) { return <div className="empty">{children}</div>; }
 
-function Row({ t, onStatus, onOpen }) {
+function Row({ t, onStatus, onOpen, blocked, waitInfo }) {
   const d = t.due ? daysUntil(t.due) : null;
   const late = d !== null && d < 0 && t.status !== "הושלם";
   const soon = d !== null && d >= 0 && d <= 3 && t.status !== "הושלם";
+  const waitDays = waitInfo && t.waitingSince ? daysUntil(t.waitingSince) * -1 : null;
+  const waitLong = waitDays !== null && waitDays >= 7;
+  const recheckDue = waitInfo && t.recheckDate && daysUntil(t.recheckDate) <= 0;
   return (
     <div className="row" onClick={() => onOpen(t)}>
       <button className="row-status" onClick={(e) => { e.stopPropagation(); onStatus(t); }} title="לחיצה משנה סטטוס">
@@ -355,9 +396,14 @@ function Row({ t, onStatus, onOpen }) {
         <div className={"row-title" + (t.status === "הושלם" ? " done" : "")}>{t.title}</div>
         <div className="row-sub">
           <span className="tag" style={{ background: catColor(t.cat) + "1A", color: catColor(t.cat) }}>{t.cat}</span>
-          {t.due && <span className={"due" + (late ? " late" : soon ? " soon" : "")}>
+          {blocked && <span className="tag tag-blocked"><Link2 size={11} /> חסום</span>}
+          {t.due && !waitInfo && <span className={"due" + (late ? " late" : soon ? " soon" : "")}>
             {late ? `באיחור ${Math.abs(d)} ימים` : d === 0 ? "היום" : `בעוד ${d} ימים`} · {fmt(t.due)}
           </span>}
+          {waitInfo && waitDays !== null && (
+            <span className={"due" + (waitLong ? " late" : "")}>ממתין {waitDays} ימים</span>
+          )}
+          {waitInfo && recheckDue && <span className="tag tag-blocked">זמן לבדוק</span>}
         </div>
       </div>
       <ChevronLeft size={18} className="row-chev" />
@@ -365,7 +411,7 @@ function Row({ t, onStatus, onOpen }) {
   );
 }
 
-function Detail({ t, onClose, onStatus, onReminder, onEdit, onDelete }) {
+function Detail({ t, onClose, onStatus, onReminder, onEdit, onDelete, blocker }) {
   const [saving, setSaving] = useState(false);
   const has = !!t.eventId;
   return (
@@ -383,6 +429,9 @@ function Detail({ t, onClose, onStatus, onReminder, onEdit, onDelete }) {
         <button className="status-pill" onClick={() => onStatus(t)}>
           <StatusIcon status={t.status} size={16} /> {t.status} · להחלפה
         </button>
+        {blocker && blocker.status !== "הושלם" && (
+          <div className="blocked-note"><Link2 size={15} /> חסום עד שתושלם: <b>{blocker.title}</b></div>
+        )}
         <dl className="kv">
           {t.due && <div><dt>תאריך יעד</dt><dd>{new Date(t.due).toLocaleDateString("he-IL")}</dd></div>}
           {t.prio && <div><dt>עדיפות</dt><dd>{t.prio}</dd></div>}
@@ -391,6 +440,10 @@ function Detail({ t, onClose, onStatus, onReminder, onEdit, onDelete }) {
           {t.phone && <div><dt>טלפון</dt><dd><a href={`tel:${t.phone}`}>{t.phone}</a></dd></div>}
           {t.docs && <div><dt>מסמכים</dt><dd>{t.docs}</dd></div>}
           {t.link && <div><dt>קישור</dt><dd><a href={t.link} target="_blank" rel="noreferrer">פתיחה</a></dd></div>}
+          {t.status === "ממתין לגורם חיצוני" && t.waitingSince && (
+            <div><dt>ממתין מאז</dt><dd>{new Date(t.waitingSince).toLocaleDateString("he-IL")} ({daysUntil(t.waitingSince) * -1} ימים)</dd></div>
+          )}
+          {t.recheckDate && <div><dt>לבדוק שוב ב-</dt><dd>{new Date(t.recheckDate).toLocaleDateString("he-IL")}</dd></div>}
           {t.note && <div><dt>הערות</dt><dd>{t.note}</dd></div>}
         </dl>
         <button className={"cal-btn" + (has ? " ok" : "")} disabled={saving || !t.due}
@@ -403,12 +456,14 @@ function Detail({ t, onClose, onStatus, onReminder, onEdit, onDelete }) {
   );
 }
 
-function TaskForm({ title, submitLabel, initial, onClose, onSave }) {
-  const blank = { title: "", cat: Object.keys(CATEGORIES)[0], status: STATUSES[0], prio: "בינונית", due: "", reminderDays: "3", who: "", phone: "", docs: "", link: "", note: "" };
+function TaskForm({ title, submitLabel, initial, tasks, onClose, onSave }) {
+  const blank = { title: "", cat: Object.keys(CATEGORIES)[0], status: STATUSES[0], prio: "בינונית", due: "", reminderDays: "3", who: "", phone: "", docs: "", link: "", note: "", dependsOn: "", recheckDate: "" };
   // בעריכה: ממלאים מראש מהמשימה הקיימת; שדות ריקים נשארים ריקים וניתנים למילוי
   const [f, setF] = useState(initial ? { ...blank, ...pick(initial) } : blank);
   const set = (k, v) => setF((s) => ({ ...s, [k]: v }));
   const valid = f.title.trim().length > 0;
+  // אפשרויות תלות: כל המשימות הפתוחות, פרט למשימה הנוכחית עצמה (אי אפשר להיות תלוי בעצמך)
+  const depOptions = (tasks || []).filter((t) => t.status !== "הושלם" && (!initial || t.id !== initial.id));
   return (
     <div className="sheet-bg" onClick={onClose}>
       <div className="sheet" onClick={(e) => e.stopPropagation()}>
@@ -429,6 +484,19 @@ function TaskForm({ title, submitLabel, initial, onClose, onSave }) {
           <div className="field"><label>תזכורת (ימים לפני)</label><input type="number" value={f.reminderDays} onChange={(e) => set("reminderDays", e.target.value)} /></div>
         </div>
         <div className="field"><label>תאריך יעד</label><input type="date" value={f.due} onChange={(e) => set("due", e.target.value)} /></div>
+
+        <div className="field">
+          <label>תלוי במשימה (חוסמת)</label>
+          <select value={f.dependsOn} onChange={(e) => set("dependsOn", e.target.value)}>
+            <option value="">ללא</option>
+            {depOptions.map((t) => <option key={t.id} value={t.id}>{t.title}</option>)}
+          </select>
+        </div>
+
+        {f.status === "ממתין לגורם חיצוני" && (
+          <div className="field"><label>לבדוק שוב בתאריך</label><input type="date" value={f.recheckDate} onChange={(e) => set("recheckDate", e.target.value)} /></div>
+        )}
+
         <div className="two">
           <div className="field"><label>גורם מטפל</label><input value={f.who} onChange={(e) => set("who", e.target.value)} /></div>
           <div className="field"><label>טלפון</label><input value={f.phone} onChange={(e) => set("phone", e.target.value)} /></div>
@@ -442,9 +510,9 @@ function TaskForm({ title, submitLabel, initial, onClose, onSave }) {
   );
 }
 
-// שולף רק את השדות שהטופס מנהל (לא _row/id/eventId/doneDate — אלה נשמרים בנפרד)
+// שולף רק את השדות שהטופס מנהל (לא _row/id/eventId/doneDate/waitingSince — אלה נשמרים בנפרד)
 function pick(t) {
-  const keys = ["title", "cat", "status", "prio", "due", "reminderDays", "who", "phone", "docs", "link", "note"];
+  const keys = ["title", "cat", "status", "prio", "due", "reminderDays", "who", "phone", "docs", "link", "note", "dependsOn", "recheckDate"];
   const o = {};
   keys.forEach((k) => { if (t[k] !== undefined && t[k] !== "") o[k] = t[k]; });
   return o;
